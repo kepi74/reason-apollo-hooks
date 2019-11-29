@@ -48,6 +48,12 @@ type fetchMoreOptions = {
   updateQuery: updateQueryT,
 };
 
+[@bs.deriving abstract]
+type callLazyQueryOptions = {
+  [@bs.optional]
+  variables: Js.Json.t,
+};
+
 module Make = (Config: Config) => {
   [@bs.module "graphql-tag"] external gql: ReasonApolloTypes.gql = "default";
 
@@ -158,5 +164,100 @@ module Make = (Config: Config) => {
       );
 
     (simple, result);
+  };
+
+  [@bs.module "@apollo/react-hooks"]
+  external useLazyQuery:
+    (ReasonApolloTypes.queryString, options) =>
+    (
+      callLazyQueryOptions => Js.Promise.t(unit),
+      {
+        .
+        "data": Js.Nullable.t(Js.Json.t),
+        "loading": bool,
+        "error": Js.Nullable.t(error),
+        [@bs.meth]
+        "refetch": Js.Nullable.t(Js.Json.t) => Js.Promise.t(Js.Json.t),
+        [@bs.meth] "fetchMore": fetchMoreOptions => Js.Promise.t(unit),
+        "networkStatus": Js.Nullable.t(int),
+      },
+    ) =
+    "useLazyQuery";
+
+  let useLazy =
+      (
+        ~variables=?,
+        ~client=?,
+        ~notifyOnNetworkStatusChange=?,
+        ~fetchPolicy=?,
+        ~errorPolicy=?,
+        ~pollInterval=?,
+        (),
+      ) => {
+    let (callQuery, jsResult) =
+      useLazyQuery(
+        gql(. Config.query),
+        options(
+          ~variables?,
+          ~client?,
+          ~notifyOnNetworkStatusChange?,
+          ~fetchPolicy=?fetchPolicy->Belt.Option.map(Types.fetchPolicyToJs),
+          ~errorPolicy=?errorPolicy->Belt.Option.map(Types.errorPolicyToJs),
+          ~pollInterval?,
+          (),
+        ),
+      );
+
+    let getData = obj =>
+      obj
+      ->Js.Json.decodeObject
+      ->Belt.Option.flatMap(x => Js.Dict.get(x, "data"))
+      ->Belt.Option.getExn;
+
+    let result =
+      React.useMemo1(
+        () =>
+          {
+            data:
+              jsResult##data
+              ->Js.Nullable.toOption
+              ->Belt.Option.flatMap(data =>
+                  switch (Config.parse(data)) {
+                  | parsedData => Some(parsedData)
+                  | exception _ => None
+                  }
+                ),
+            loading: jsResult##loading,
+            error: jsResult##error->Js.Nullable.toOption,
+            networkStatus: Types.toNetworkStatus(jsResult##networkStatus),
+            refetch: (~variables=?, ()) =>
+              jsResult##refetch(Js.Nullable.fromOption(variables))
+              |> Js.Promise.then_(result =>
+                   Config.parse(result->getData) |> Js.Promise.resolve
+                 ),
+            fetchMore: (~variables=?, ~updateQuery, ()) =>
+              jsResult##fetchMore(
+                fetchMoreOptions(~variables?, ~updateQuery, ()),
+              ),
+          },
+        [|jsResult|],
+      );
+
+    let simple =
+      React.useMemo1(
+        () =>
+          switch (result) {
+          | {loading: true} => Loading
+          | {error: Some(error)} => Error(error)
+          | {data: Some(data)} => Data(data)
+          | _ => NoData
+          },
+        [|result|],
+      );
+
+    let callLazyQuery = (~variables=?, ()) =>
+      callQuery(callLazyQueryOptions(~variables?, ()));
+
+    (callLazyQuery, simple, result);
   };
 };
